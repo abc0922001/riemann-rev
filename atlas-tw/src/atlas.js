@@ -21,6 +21,7 @@
     alternative: '替代路徑',
     motivation: '歷史動機'
   };
+  const prefersReducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   /* ---------------------------------------------------------------- 文字與語法高亮度輔助函式 */
   const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -50,25 +51,88 @@
     return out + esc(code.slice(last));
   }
   const tierBadge = t => `<span class="tier" style="--tc:${T[t].color}" title="${esc(T[t].meaning)}"><i>${esc(T[t].icon)}</i>${esc(T[t].label)}</span>`;
+  const stratTextColor = s => (s.id === 'ana' ? 'var(--ana-text, #0e7490)' : s.color);
   const typeset = el => { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {}); };
   const compChip = id => { const c = comp[id], s = strat[c.stratum];
-    return `<button class="chip" data-open-comp="${id}"><span class="dot" style="background:${s.color}"></span>${c.n}. ${esc(c.title)}</button>`; };
+    return `<button type="button" class="chip" data-open-comp="${id}"><span class="dot" style="background:${s.color}"></span>${c.n}. ${esc(c.title)}</button>`; };
   const nodeChip = id => { const n = node[id];
-    return `<button class="chip" data-open-node="${id}" title="${esc(n.declaration || n.title)}"><span class="dot" style="background:${T[n.tier].color}"></span>${esc(n.title)}</button>`; };
+    return `<button type="button" class="chip" data-open-node="${id}" title="${esc(n.declaration || n.title)}"><span class="dot" style="background:${T[n.tier].color}"></span>${esc(n.title)}</button>`; };
 
-  /* ---------------------------------------------------------------- 側邊詳細資訊抽屜 */
-  const drawer = $('#drawer'), back = $('#drawer-back'), dc = $('#drawer-content');
-  function openDrawer(html) {
-    dc.innerHTML = html;
-    drawer.classList.add('show'); back.classList.add('show');
-    drawer.setAttribute('aria-hidden', 'false');
-    dc.scrollTop = 0; $('.drawer-body', dc) && ($('.drawer-body', dc).scrollTop = 0);
-    typeset(dc);
-    const btn = $('.close', dc); if (btn) { btn.onclick = closeDrawer; btn.focus({ preventScroll: true }); }
+  /* ---------------------------------------------------------------- 側邊詳細資訊抽屜（原生 modal <dialog>） */
+  const drawer = $('#drawer'), dc = $('#drawer-content');
+  let supportsDisplayTransition;
+  function canTransitionDisplay() {
+    if (supportsDisplayTransition !== undefined) return supportsDisplayTransition;
+    if (!window.CSS?.supports?.('transition-behavior', 'allow-discrete') || !document.body) {
+      return false;
+    }
+    const probe = document.createElement('div');
+    probe.style.cssText = 'transition: display 1s allow-discrete !important; display: block;';
+    document.body.appendChild(probe);
+    getComputedStyle(probe).display;
+    probe.style.display = 'none';
+    supportsDisplayTransition = getComputedStyle(probe).display === 'block';
+    probe.remove();
+    return supportsDisplayTransition;
   }
-  function closeDrawer() { drawer.classList.remove('show'); back.classList.remove('show'); drawer.setAttribute('aria-hidden', 'true'); }
-  back.addEventListener('click', closeDrawer);
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
+  function supportsTopLayerExit() {
+    return Boolean(window.CSS?.supports?.('overlay', 'auto') && canTransitionDisplay());
+  }
+  function openDrawer(html) {
+    const wasOpen = drawer.open;
+    drawer.removeAttribute('data-closing');
+    dc.innerHTML = html;
+    drawer.setAttribute('aria-labelledby', 'drawer-title');
+    dc.scrollTop = 0;
+    const body = $('.drawer-body', dc);
+    if (body) body.scrollTop = 0;
+    if (!wasOpen) drawer.showModal();
+    typeset(dc);
+    const btn = $('.close', dc);
+    if (btn) {
+      btn.addEventListener('click', closeDrawer);
+      if (wasOpen) btn.focus({ preventScroll: true });
+    }
+  }
+  async function closeDrawer() {
+    if (!drawer.open) return;
+    if (!supportsTopLayerExit()) {
+      if (drawer.hasAttribute('data-closing')) return;
+      drawer.setAttribute('data-closing', '');
+      const animations = typeof drawer.getAnimations === 'function' ? drawer.getAnimations({ subtree: true }) : [];
+      if (animations.length > 0) {
+        await Promise.race([
+          Promise.allSettled(animations.map(a => a.finished)),
+          new Promise(r => setTimeout(r, 2000))
+        ]);
+      }
+      if (!drawer.hasAttribute('data-closing')) return;
+      drawer.removeAttribute('data-closing');
+    }
+    if (drawer.open) drawer.close();
+  }
+  drawer.addEventListener('cancel', e => {
+    if (!supportsTopLayerExit() && e.cancelable) {
+      e.preventDefault();
+      closeDrawer();
+    }
+  });
+  drawer.addEventListener('close', () => {
+    drawer.returnValue = '';
+    drawer.removeAttribute('data-closing');
+  });
+  if (!('closedBy' in HTMLDialogElement.prototype)) {
+    const outside = e => {
+      const r = drawer.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    let pressedOutside = false;
+    drawer.addEventListener('pointerdown', e => { pressedOutside = drawer.open && outside(e); });
+    drawer.addEventListener('pointerup', e => {
+      if (pressedOutside && drawer.open && outside(e)) closeDrawer();
+      pressedOutside = false;
+    });
+  }
 
   function componentHTML(id) {
     const c = comp[id], s = strat[c.stratum];
@@ -76,23 +140,23 @@
     const fig = c.figure && document.getElementById('fig-' + c.figure);
     const cuts = A.cuts.filter(k => k.components.includes(id));
     const tl = A.timeline.filter(t => t.component === id);
-    return `<div class="drawer-head"><button class="close" aria-label="關閉">×</button>
-      <div class="strat" style="color:${s.color}">${esc(s.title)} · 第 ${c.n} / ${A.components.length} 個元件</div>
-      <h3>${esc(c.title)}</h3><div class="mono small muted">${esc(c.kicker)}</div>
+    return `<div class="drawer-head"><button type="button" class="close" aria-label="關閉詳細資訊" autofocus>×</button>
+      <div class="strat" style="color:${stratTextColor(s)}">${esc(s.title)} · 第 ${c.n} / ${A.components.length} 個元件</div>
+      <h2 id="drawer-title">${esc(c.title)}</h2><div class="mono small muted">${esc(c.kicker)}</div>
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">${tierBadge(c.tier)}${cuts.map(k => `<span class="tier" style="--tc:${T[k.tier].color}"><i>⊢</i>位於切口「${esc(k.title)}」內</span>`).join('')}</div></div>
       <div class="drawer-body">
       <p><b>${md(c.gist)}</b></p>
-      <h5>定理敘述</h5><div class="stmt">$$${esc(c.statement)}$$</div>
-      <h5>核心想法</h5>${c.explanation.map(p => `<p>${md(p)}</p>`).join('')}
-      ${fig ? `<h5>圖解</h5><div class="fig">${fig.innerHTML}</div>` : ''}
-      <h5>Lean 宣告 · 鎖定原始碼</h5><ul class="lean">${c.lean.map(l =>
+      <h3>定理敘述</h3><div class="stmt">$$${esc(c.statement)}$$</div>
+      <h3>核心想法</h3>${c.explanation.map(p => `<p>${md(p)}</p>`).join('')}
+      ${fig ? `<h3>圖解</h3><div class="fig">${fig.innerHTML}</div>` : ''}
+      <h3>Lean 宣告 · 鎖定原始碼</h3><ul class="lean">${c.lean.map(l =>
         `<li><a href="${esc(l.url)}" target="_blank" rel="noopener"><code>${esc(l.name)}</code> ↗</a>${l.note ? `<span class="nt">${esc(l.note)}</span>` : ''}</li>`).join('')}</ul>
-      <h5>驗證狀態</h5><p class="status">${md(c.status)}</p><p class="small muted">${tierBadge(c.tier)} ${esc(T[c.tier].meaning)}</p>
-      <h5>尚待檢查項目</h5><div class="check">${md(c.check)}</div>
-      ${ups.length ? `<h5>接收自</h5><div class="chips">${ups.map(i => compChip(i.from) + `<span class="small muted" style="align-self:center">→ ${esc(i.label)}</span>`).join('')}</div>` : ''}
-      ${downs.length ? `<h5>供給至</h5><div class="chips">${downs.map(i => `<span class="small muted" style="align-self:center">${esc(i.label)} →</span>` + compChip(i.to)).join('')}</div>` : ''}
-      <h5>藍圖宣告（${c.nodes.length}）</h5><div class="chips">${c.nodes.map(nodeChip).join('')}</div>
-      ${tl.length ? `<h5>宣告文時間軸</h5><ul>${tl.map(t => `<li><b>${t.number}.</b> ${esc(t.topic)} <span class="relation">${esc(t.relation)}</span>${t.date ? ` <span class="small muted">${esc(t.date)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+      <h3>驗證狀態</h3><p class="status">${md(c.status)}</p><p class="small muted">${tierBadge(c.tier)} ${esc(T[c.tier].meaning)}</p>
+      <h3>尚待檢查項目</h3><div class="check">${md(c.check)}</div>
+      ${ups.length ? `<h3>接收自</h3><div class="chips">${ups.map(i => compChip(i.from) + `<span class="small muted" style="align-self:center">→ ${esc(i.label)}</span>`).join('')}</div>` : ''}
+      ${downs.length ? `<h3>供給至</h3><div class="chips">${downs.map(i => `<span class="small muted" style="align-self:center">${esc(i.label)} →</span>` + compChip(i.to)).join('')}</div>` : ''}
+      <h3>藍圖宣告（${c.nodes.length}）</h3><div class="chips">${c.nodes.map(nodeChip).join('')}</div>
+      ${tl.length ? `<h3>宣告文時間軸</h3><ul>${tl.map(t => `<li><b>${t.number}.</b> ${esc(t.topic)} <span class="relation">${esc(t.relation)}</span>${t.date ? ` <span class="small muted">${esc(t.date)}</span>` : ''}</li>`).join('')}</ul>` : ''}
       </div>`;
   }
   function nodeHTML(id) {
@@ -101,25 +165,25 @@
     const ev = (n.evidence || []).map(e => A.evidence[e] || e);
     const lines = n.lines ? `第 ${n.lines[0]}–${n.lines[1]} 行` : '';
     const kindLabel = KIND[n.kind] || n.kind;
-    return `<div class="drawer-head"><button class="close" aria-label="關閉">×</button>
-      <div class="strat" style="color:${s.color}">藍圖宣告 · ${esc(kindLabel)} · ${esc(c.title)}</div>
-      <h3>${esc(n.title)}</h3>
+    return `<div class="drawer-head"><button type="button" class="close" aria-label="關閉詳細資訊" autofocus>×</button>
+      <div class="strat" style="color:${stratTextColor(s)}">藍圖宣告 · ${esc(kindLabel)} · ${esc(c.title)}</div>
+      <h2 id="drawer-title">${esc(n.title)}</h2>
       ${n.declaration ? `<div class="mono small">${esc(n.module ? n.module + ' · ' : '')}<b>${esc(n.declaration)}</b></div>` : ''}
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">${tierBadge(n.tier)}
       ${n.url ? `<a class="btn light" style="padding:4px 10px;font-size:.8rem" href="${esc(n.url)}" target="_blank" rel="noopener">鎖定原始碼 ${esc(lines)} ↗</a>` : ''}
-      <button class="btn light" style="padding:4px 10px;font-size:.8rem" data-graph-node="${id}">在圖表中顯示</button>
-      <button class="btn light" style="padding:4px 10px;font-size:.8rem" data-trace="down" data-node="${id}" title="高亮度顯示此宣告所依賴的所有上游節點">依賴上游 ↓</button>
-      <button class="btn light" style="padding:4px 10px;font-size:.8rem" data-trace="up" data-node="${id}" title="高亮度顯示使用此宣告的所有下游節點，直達終點定理">被使用於 ↑</button></div></div>
+      <button type="button" class="btn light" style="padding:4px 10px;font-size:.8rem" data-graph-node="${id}">在圖表中顯示</button>
+      <button type="button" class="btn light" style="padding:4px 10px;font-size:.8rem" data-trace="down" data-node="${id}" title="高亮度顯示此宣告所依賴的所有上游節點">依賴上游 ↓</button>
+      <button type="button" class="btn light" style="padding:4px 10px;font-size:.8rem" data-trace="up" data-node="${id}" title="高亮度顯示使用此宣告的所有下游節點，直達終點定理">被使用於 ↑</button></div></div>
       <div class="drawer-body">
-      <h5>標準數學表述</h5><p>${md(n.contract)}</p>
-      <h5>證明內容</h5><p>${md(n.idea)}</p>
-      ${n.assumptions && n.assumptions.length ? `<h5>明確假設</h5><ul>${n.assumptions.map(a => `<li>${md(typeof a === 'string' ? a : (a.text || a.name || JSON.stringify(a)))}</li>`).join('')}</ul>` : ''}
-      ${n.lean_head ? `<h5>Lean 陳述</h5><pre class="lean">${hl(n.lean_head)}</pre>` : ''}
-      ${n.excerpt && n.excerpt !== n.lean_head ? `<h5>原始碼節錄</h5><pre class="lean">${hl(n.excerpt)}</pre>` : ''}
-      <h5>依賴項目（${uses.length}）</h5><div class="chips">${uses.map(e => nodeChip(e.to)).join('') || '<span class="small muted">無已選取的下層依賴</span>'}</div>
-      <h5>被使用於（${usedBy.length}）</h5><div class="chips">${usedBy.map(e => nodeChip(e.from)).join('') || '<span class="small muted">終點定理或歷史動機</span>'}</div>
-      <h5>所屬元件</h5><div class="chips">${compChip(c.id)}</div>
-      <h5>驗證憑證</h5><ul class="small">${ev.map(e => `<li>${esc(e)}</li>`).join('')}</ul>
+      <h3>標準數學表述</h3><p>${md(n.contract)}</p>
+      <h3>證明內容</h3><p>${md(n.idea)}</p>
+      ${n.assumptions && n.assumptions.length ? `<h3>明確假設</h3><ul>${n.assumptions.map(a => `<li>${md(typeof a === 'string' ? a : (a.text || a.name || JSON.stringify(a)))}</li>`).join('')}</ul>` : ''}
+      ${n.lean_head ? `<h3>Lean 陳述</h3><pre class="lean" tabindex="0" lang="en">${hl(n.lean_head)}</pre>` : ''}
+      ${n.excerpt && n.excerpt !== n.lean_head ? `<h3>原始碼節錄</h3><pre class="lean" tabindex="0" lang="en">${hl(n.excerpt)}</pre>` : ''}
+      <h3>依賴項目（${uses.length}）</h3><div class="chips">${uses.map(e => nodeChip(e.to)).join('') || '<span class="small muted">無已選取的下層依賴</span>'}</div>
+      <h3>被使用於（${usedBy.length}）</h3><div class="chips">${usedBy.map(e => nodeChip(e.from)).join('') || '<span class="small muted">終點定理或歷史動機</span>'}</div>
+      <h3>所屬元件</h3><div class="chips">${compChip(c.id)}</div>
+      <h3>驗證憑證</h3><ul class="small">${ev.map(e => `<li>${esc(e)}</li>`).join('')}</ul>
       <p class="small muted">${esc(T[n.tier].meaning)}</p>
       </div>`;
   }
@@ -132,7 +196,7 @@
     const n = e.target.closest('[data-open-node]');
     if (n) { e.preventDefault(); openNode(n.dataset.openNode); if (graph) graph.select(n.dataset.openNode, { center: true, open: false }); return; }
     const g = e.target.closest('[data-graph-node]');
-    if (g) { e.preventDefault(); closeDrawer(); $('#blueprint').scrollIntoView({ behavior: 'smooth' });
+    if (g) { e.preventDefault(); closeDrawer(); $('#blueprint').scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
       setTimeout(() => graph.select(g.dataset.graphNode, { center: true, open: false }), 350); }
   });
 
@@ -140,29 +204,48 @@
   const map = $('#map'), msvg = $('#map-svg');
   $$('.comp', map).forEach(el => {
     el.addEventListener('click', () => openComponent(el.dataset.id));
-    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openComponent(el.dataset.id); } });
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); openComponent(el.dataset.id); }
+      else if (e.key === ' ') { e.preventDefault(); }
+    });
+    el.addEventListener('keyup', e => {
+      if (e.key === ' ') { e.preventDefault(); openComponent(el.dataset.id); }
+    });
   });
   function mk(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
   function drawMap() {
     if (getComputedStyle(msvg).display === 'none') return;
+    // 第一階段：批次讀取所有幾何配置，避免讀寫交錯造成版面抖動
     const R = map.getBoundingClientRect();
-    while (msvg.firstChild) msvg.removeChild(msvg.firstChild);
-    const defs = mk('defs', {}, msvg);
+    const compRects = {};
+    $$('.comp', map).forEach(el => {
+      const r = el.getBoundingClientRect();
+      compRects[el.dataset.id] = {
+        x: r.left - R.left, y: r.top - R.top, w: r.width, h: r.height,
+        col: +el.dataset.col, row: +el.dataset.row
+      };
+    });
+    const bandRects = A.strata.map((s, i) => {
+      const cards = $$(`.comp[data-col="${i + 1}"]`, map).map(el => compRects[el.dataset.id]);
+      const head = $(`.map-col-head[data-col="${i + 1}"]`, map).getBoundingClientRect();
+      const hx0 = head.left - R.left, hx1 = head.right - R.left, hy0 = head.top - R.top;
+      const x0 = Math.min(...cards.map(r => r.x), hx0) - 10;
+      const x1 = Math.max(...cards.map(r => r.x + r.w), hx1) + 10;
+      const y0 = hy0 - 8;
+      const y1 = Math.max(...cards.map(r => r.y + r.h)) + 12;
+      return { x: x0, y: y0, width: x1 - x0, height: y1 - y0, fill: s.color };
+    });
+    // 第二階段：批次建構並掛載 SVG 節點
+    msvg.replaceChildren();
+    const frag = document.createDocumentFragment();
+    const defs = mk('defs', {}, frag);
     const mrk = mk('marker', { id: 'mh', viewBox: '0 0 10 10', refX: '8.5', refY: '5', markerWidth: '7', markerHeight: '7', orient: 'auto-start-reverse' }, defs);
     mk('path', { d: 'M0,0 L10,5 L0,10 z', fill: '#475569' }, mrk);
-    const rect = id => { const r = $(`.comp[data-id="${id}"]`, map).getBoundingClientRect();
-      return { x: r.left - R.left, y: r.top - R.top, w: r.width, h: r.height, col: +$(`.comp[data-id="${id}"]`, map).dataset.col, row: +$(`.comp[data-id="${id}"]`, map).dataset.row }; };
     // 層級底色區塊
-    A.strata.forEach((s, i) => {
-      const cards = $$(`.comp[data-col="${i + 1}"]`, map).map(el => el.getBoundingClientRect());
-      const head = $(`.map-col-head[data-col="${i + 1}"]`, map).getBoundingClientRect();
-      const x0 = Math.min(...cards.map(r => r.left), head.left) - R.left - 10, x1 = Math.max(...cards.map(r => r.right), head.right) - R.left + 10;
-      const y0 = head.top - R.top - 8, y1 = Math.max(...cards.map(r => r.bottom)) - R.top + 12;
-      mk('rect', { x: x0, y: y0, width: x1 - x0, height: y1 - y0, rx: 18, fill: s.color, opacity: 0.055 }, msvg);
-    });
+    bandRects.forEach(b => mk('rect', { x: b.x, y: b.y, width: b.width, height: b.height, rx: 18, fill: b.fill, opacity: 0.055 }, frag));
     const labels = [];
     A.interfaces.forEach(it => {
-      const a = rect(it.from), b = rect(it.to);
+      const a = compRects[it.from], b = compRects[it.to];
       let d, mx, my, rot = 0;
       if (a.col === b.col && Math.abs(a.row - b.row) === 1) {
         const down = b.row > a.row, x1 = a.x + a.w / 2, x2 = b.x + b.w / 2;
@@ -184,16 +267,22 @@
         d = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2 - 2},${y2}`; mx = (x1 + x2) / 2; my = (y1 + y2) / 2;
       }
       mk('path', { d, fill: 'none', stroke: '#475569', 'stroke-width': 1.6, 'marker-end': 'url(#mh)', opacity: 0.8,
-        'data-from': it.from, 'data-to': it.to, class: 'iface' }, msvg);
+        'data-from': it.from, 'data-to': it.to, class: 'iface' }, frag);
       labels.push({ x: mx, y: my, text: it.label, rot, lean: it.lean });
     });
-    labels.forEach(l => {
-      const g = mk('g', l.rot ? { transform: `rotate(${l.rot},${l.x},${l.y})` } : {}, msvg);
+    const labelEls = labels.map(l => {
+      const g = mk('g', l.rot ? { transform: `rotate(${l.rot},${l.x},${l.y})` } : {}, frag);
       const bg = mk('rect', { class: 'lblbg', rx: 6, ry: 6 }, g);
       const t = mk('text', { class: 'lbl', x: l.x, y: l.y + 3.5, 'text-anchor': 'middle' }, g);
       t.textContent = l.text;
       const tt = mk('title', {}, g); tt.textContent = `${l.text} — Lean：${l.lean}`;
-      const w = t.getComputedTextLength ? t.getComputedTextLength() : l.text.length * 10;
+      return { l, bg, t };
+    });
+    msvg.appendChild(frag);
+    // 第三階段：批次量測標籤寬度後再統一寫入背景框屬性
+    const widths = labelEls.map(({ l, t }) => (t.getComputedTextLength ? t.getComputedTextLength() : l.text.length * 10));
+    labelEls.forEach(({ l, bg }, idx) => {
+      const w = widths[idx];
       bg.setAttribute('x', l.x - w / 2 - 6); bg.setAttribute('y', l.y - 9); bg.setAttribute('width', w + 12); bg.setAttribute('height', 18);
     });
   }
@@ -206,12 +295,13 @@
   const callout = $('#cut-callout');
   $$('[data-cut]').forEach(btn => btn.addEventListener('click', () => {
     const id = btn.dataset.cut, on = !btn.classList.contains('on');
-    $$('[data-cut]').forEach(b => b.classList.remove('on'));
+    $$('[data-cut]').forEach(b => { b.classList.remove('on'); b.setAttribute('aria-pressed', 'false'); });
     $$('.comp', map).forEach(el => el.classList.remove('in', 'out'));
     map.classList.toggle('cutmode', on && id !== 'none');
     callout.classList.remove('show');
     if (!on || id === 'none') return;
     btn.classList.add('on');
+    btn.setAttribute('aria-pressed', 'true');
     const k = A.cuts.find(x => x.id === id);
     $$('.comp', map).forEach(el => el.classList.add(k.components.includes(el.dataset.id) ? 'in' : 'out'));
     callout.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">${tierBadge(k.tier)}<b>${esc(k.title)}</b> <code>${esc(k.lean)}</code></div>
@@ -226,14 +316,14 @@
     let i = 0, on = false;
     function show() {
       const st = A.story[i], c = comp[st.comp], s = strat[c.stratum];
-      $$('[data-cut]').forEach(b => b.classList.remove('on'));
+      $$('[data-cut]').forEach(b => { b.classList.remove('on'); b.setAttribute('aria-pressed', 'false'); });
       map.classList.add('cutmode');
       $$('.comp', map).forEach(el => { el.classList.remove('in', 'out'); el.classList.add(el.dataset.id === st.comp ? 'in' : 'out'); });
       callout.style.background = '#eef2ff'; callout.style.borderColor = '#c7d2fe'; callout.style.color = '#1e1b4b';
       callout.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="chip on">${i + 1} / ${A.story.length}</span>
         <span class="dot" style="background:${s.color}"></span><b>${c.n}. ${esc(c.title)}</b><span class="small muted">${esc(s.title)}</span>
-        <span style="margin-left:auto;display:flex;gap:6px"><button class="btn light" data-st="prev">←</button><button class="btn light" data-st="next">→</button>
-        <button class="btn light" data-open-comp="${c.id}">詳細說明</button><button class="btn light" data-st="stop">結束</button></span></div>
+        <span style="margin-left:auto;display:flex;gap:6px"><button type="button" class="btn light" data-st="prev" aria-label="上一步">←</button><button type="button" class="btn light" data-st="next" aria-label="下一步">→</button>
+        <button type="button" class="btn light" data-open-comp="${c.id}">詳細說明</button><button type="button" class="btn light" data-st="stop">結束</button></span></div>
         <p style="margin:10px 0 0;font-size:1.02rem">${md(st.text)}</p>`;
       callout.classList.add('show'); typeset(callout);
       callout.querySelector('[data-st=prev]').onclick = () => { i = Math.max(0, i - 1); show(); };
@@ -241,13 +331,13 @@
       callout.querySelector('[data-st=stop]').onclick = stop;
       const el = $(`.comp[data-id="${st.comp}"]`, map);
       const r = el.getBoundingClientRect();
-      if (r.top < 120 || r.bottom > innerHeight - 20) window.scrollTo({ top: scrollY + r.top - innerHeight / 2 + r.height / 2, behavior: 'smooth' });
+      if (r.top < 120 || r.bottom > innerHeight - 20) window.scrollTo({ top: scrollY + r.top - innerHeight / 2 + r.height / 2, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
     }
     function stop() { on = false; map.classList.remove('cutmode'); $$('.comp', map).forEach(el => el.classList.remove('in', 'out'));
       callout.classList.remove('show'); callout.removeAttribute('style'); start.textContent = '▶ 導覽路線：從黎曼猜想往回追溯'; }
     start.addEventListener('click', () => { if (on) { stop(); return; } on = true; i = 0; start.textContent = '■ 停止導覽';
-      $('#map-section').scrollIntoView({ behavior: 'smooth' }); setTimeout(show, 250); });
-    document.addEventListener('keydown', e => { if (!on || drawer.classList.contains('show')) return;
+      $('#map-section').scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth' }); setTimeout(show, 250); });
+    document.addEventListener('keydown', e => { if (!on || drawer.open) return;
       if (e.key === 'ArrowRight') { i = Math.min(A.story.length - 1, i + 1); show(); }
       if (e.key === 'ArrowLeft') { i = Math.max(0, i - 1); show(); } });
     $$('[data-cut]').forEach(b => b.addEventListener('click', () => { if (on) { on = false; start.textContent = '▶ 導覽路線：從黎曼猜想往回追溯'; callout.removeAttribute('style'); } }, true));
@@ -273,7 +363,13 @@
     const nodeEls = {};
     A.nodes.forEach(n => {
       const c = comp[n.component], col = strat[c.stratum].color;
-      const g = mk('g', { class: 'bp-node', transform: `translate(${n.x},${n.y})`, tabindex: '0' }, nG);
+      const g = mk('g', {
+        class: 'bp-node',
+        transform: `translate(${n.x},${n.y})`,
+        tabindex: '0',
+        role: 'button',
+        'aria-label': `${n.title}（${T[n.tier].label}）`
+      }, nG);
       g.dataset.id = n.id;
       mk('rect', { class: 'box', width: NW, height: NH, rx: 9 }, g);
       mk('rect', { x: 0, y: 0, width: 6, height: NH, rx: 3, fill: col }, g);
@@ -282,7 +378,13 @@
       const d = mk('text', { class: 'd', x: 14, y: 35 }, g); d.textContent = n.decl_short || KIND[n.kind] || n.kind;
       const tt = mk('title', {}, g); tt.textContent = `${n.title}\n${n.declaration || ''}\n${T[n.tier].label}`;
       g.addEventListener('click', ev => { ev.stopPropagation(); select(n.id, { open: true }); });
-      g.addEventListener('keydown', ev => { if (ev.key === 'Enter') select(n.id, { open: true }); });
+      g.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter') { ev.preventDefault(); select(n.id, { open: true }); }
+        else if (ev.key === ' ') { ev.preventDefault(); }
+      });
+      g.addEventListener('keyup', ev => {
+        if (ev.key === ' ') { ev.preventDefault(); select(n.id, { open: true }); }
+      });
       nodeEls[n.id] = g;
     });
     // 平移與縮放
@@ -302,6 +404,7 @@
     function centerOn(id, k) {
       const n = node[id], r = svg.getBoundingClientRect(), kk = k || Math.max(view.k, 0.85);
       const target = { k: kk, x: r.width / 2 - (n.x + NW / 2) * kk, y: r.height / 2 - (n.y + NH / 2) * kk };
+      if (prefersReducedMotion()) { view = target; apply(); return; }
       const from = { ...view }, t0 = performance.now();
       const step = now => { const u = Math.min(1, (now - t0) / 420), e = u < .5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
         view = { k: from.k + (target.k - from.k) * e, x: from.x + (target.x - from.x) * e, y: from.y + (target.y - from.y) * e }; apply();
@@ -328,16 +431,28 @@
         if (a === u && !seen.has(b)) { seen.add(b); q.push(b); } }); }
       return seen;
     }
-    // 搜尋功能
-    const search = $('#bp-search'); let hits = [], hi = 0;
+    // 搜尋功能（含 IME 組字安全防護與即時區域節流播報）
+    const search = $('#bp-search'), countEl = $('#bp-count');
+    let hits = [], hi = 0, countTimer = null;
     search.addEventListener('input', () => {
       const q = search.value.trim().toLowerCase(); clear(); hits = []; hi = 0;
-      if (!q) { $('#bp-count').textContent = ''; return; }
+      clearTimeout(countTimer);
+      if (!q) { countEl.textContent = ''; return; }
       A.nodes.forEach(n => { if ((n.title + ' ' + (n.declaration || '') + ' ' + n.contract + ' ' + comp[n.component].title).toLowerCase().includes(q)) hits.push(n.id); });
       shell.classList.add('bp-dim'); hits.forEach(i => nodeEls[i].classList.add('match'));
-      $('#bp-count').textContent = hits.length ? `找到 ${hits.length} 筆符合結果 · 按 Enter 依序跳轉` : '找不到符合項目';
+      const msg = hits.length ? `找到 ${hits.length} 筆符合結果 · 按 Enter 依序跳轉` : '找不到符合項目';
+      countTimer = setTimeout(() => { countEl.textContent = msg; }, 150);
     });
-    search.addEventListener('keydown', e => { if (e.key === 'Enter' && hits.length) { centerOn(hits[hi % hits.length]); hi++; } });
+    search.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        if (e.isComposing || e.keyCode === 229) return;
+        if (hits.length) {
+          e.preventDefault();
+          centerOn(hits[hi % hits.length]);
+          hi++;
+        }
+      }
+    });
     // 依元件、層級或驗證等級高亮顯示
     $('#bp-filter').addEventListener('change', e => {
       const v = e.target.value; if (!v) { clear(); return; }
@@ -352,8 +467,8 @@
       select(id, { center: true });
       bar.innerHTML = `<b>${esc(tour.title)}</b><span class="small">${esc(tour.question)}</span>
         <span class="chip on">${ti + 1} / ${tour.nodes.length}</span><span><b>${esc(n.title)}</b> — <span class="small">${md(n.contract)}</span></span>
-        <span style="margin-left:auto;display:flex;gap:6px"><button class="btn light" data-t="prev">←</button><button class="btn light" data-t="next">→</button>
-        <button class="btn light" data-open-node="${id}">詳細說明</button><button class="btn light" data-t="stop">結束</button></span>`;
+        <span style="margin-left:auto;display:flex;gap:6px"><button type="button" class="btn light" data-t="prev" aria-label="上一步">←</button><button type="button" class="btn light" data-t="next" aria-label="下一步">→</button>
+        <button type="button" class="btn light" data-open-node="${id}">詳細說明</button><button type="button" class="btn light" data-t="stop">結束</button></span>`;
       bar.classList.add('show'); typeset(bar);
       bar.querySelector('[data-t=prev]').onclick = () => { ti = Math.max(0, ti - 1); showStep(); };
       bar.querySelector('[data-t=next]').onclick = () => { ti = Math.min(tour.nodes.length - 1, ti + 1); showStep(); };
@@ -395,10 +510,59 @@
     return { select, centerOn, cone, mark, fit };
   })();
 
+  /* ---------------------------------------------------------------- 頂部導覽列捲動監聽（Scrollspy） */
+  (() => {
+    const links = $$('.topnav-links a');
+    if (!links.length) return;
+    const setAriaCurrent = activeLink => {
+      links.forEach(link => {
+        if (link === activeLink) link.setAttribute('aria-current', 'true');
+        else link.removeAttribute('aria-current');
+      });
+    };
+    if (window.CSS?.supports?.('scroll-target-group: auto')) {
+      const syncAriaCurrent = () => {
+        let currentLink = null;
+        try { currentLink = $('.topnav-links a:target-current'); } catch {}
+        setAriaCurrent(currentLink);
+      };
+      let raf1 = 0, raf2 = 0;
+      const scheduleSync = () => {
+        cancelAnimationFrame(raf1);
+        cancelAnimationFrame(raf2);
+        raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(syncAriaCurrent); });
+      };
+      scheduleSync();
+      window.addEventListener('load', scheduleSync, { once: true });
+      if ('onscrollend' in window) {
+        document.addEventListener('scrollend', scheduleSync, { passive: true });
+      } else {
+        let scrollTimer = null;
+        window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(scheduleSync, 120); }, { passive: true });
+      }
+      window.addEventListener('hashchange', scheduleSync);
+    } else if ('IntersectionObserver' in window) {
+      const sections = $$('main > section[id]');
+      const linkById = Object.fromEntries(links.map(a => [a.getAttribute('href').slice(1), a]));
+      const observer = new IntersectionObserver(entries => {
+        const visible = entries.filter(e => e.isIntersecting);
+        if (!visible.length) return;
+        const active = linkById[visible[visible.length - 1].target.id] || null;
+        links.forEach(link => {
+          const isCurrent = link === active;
+          link.classList.toggle('target-current', isCurrent);
+          if (isCurrent) link.setAttribute('aria-current', 'true');
+          else link.removeAttribute('aria-current');
+        });
+      }, { rootMargin: '-20% 0px -70% 0px', threshold: 0 });
+      sections.forEach(s => observer.observe(s));
+    }
+  })();
+
   // 節點抽屜內的「依賴上游」／「被使用於」按鈕
   document.addEventListener('click', e => {
     const b = e.target.closest('[data-trace]'); if (!b || !graph) return;
-    closeDrawer(); $('#blueprint').scrollIntoView({ behavior: 'smooth' });
+    closeDrawer(); $('#blueprint').scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
     graph.mark(graph.cone(b.dataset.node, b.dataset.trace), true);
   });
 
